@@ -1,7 +1,6 @@
 import asyncio
 import functools
-from typing import Optional, Awaitable
-from typing_extensions import Protocol
+from typing import Optional, Awaitable, Protocol
 
 import httpx
 
