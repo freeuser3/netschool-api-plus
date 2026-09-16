@@ -10,6 +10,7 @@ dependencies = [
     "marshmallow==3.19.0",
     "marshmallow-dataclass==8.5.11",
     "typing-extensions==4.4.0",
+    "websockets>=17.1",
 ]
 
 [tool.setuptools]

@@ -1,15 +1,17 @@
 import asyncio
 import datetime
 import json
+from unittest.mock import patch
 
 from httpx import AsyncClient
 
 from netschoolapi_plus import NetSchoolAPI
 
 
-class FakeStream:
+class FakeSocket:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.sent = []
 
     async def __aenter__(self):
         return self
@@ -17,9 +19,11 @@ class FakeStream:
     async def __aexit__(self, *_):
         return False
 
-    async def aiter_text(self):
-        for chunk in self._chunks:
-            yield chunk
+    async def send(self, data):
+        self.sent.append(data)
+
+    async def recv(self):
+        return self._chunks.pop(0)
 
 
 class FakeResponse:
@@ -37,11 +41,14 @@ class FakeResponse:
 
 
 class FakeClient:
-    def __init__(self, url, responses, stream):
+    def __init__(self, url, responses):
         self._base = AsyncClient(base_url=f"{url}/webapi")
         self._responses = responses
-        self._stream = stream
         self.requests = []
+
+    @property
+    def cookies(self):
+        return self._base.cookies
 
     def build_request(self, method, url, **kwargs):
         return self._base.build_request(method, url, **kwargs)
@@ -50,79 +57,94 @@ class FakeClient:
         self.requests.append(request)
         return self._responses[request.url.path]
 
-    def stream(self, method, url, **kwargs):
-        return self._stream
 
-
-def test_report_file_generates_official_report():
-    complete_chunk = (
-        'data: {"H":"queuehub","M":[{"M":"complete","A":[{"Data":"file123"}]}],'
-        '"I":0,"T":0,"G":0}\r\n'
-    )
+def test_report_file_generates_official_report_via_websocket():
+    filter_sources = [
+        {"filterId": "SID", "defaultValue": "562093"},
+        {"filterId": "PCLID", "defaultValue": "92540"},
+        {"filterId": "TERMID", "defaultValue": "24816"},
+        {
+            "filterId": "period",
+            "defaultValue": "2026-09-01T00:00:00.0000000 - "
+                             "2026-09-30T00:00:00.0000000",
+        },
+    ]
     responses = {
-        "/WebApi/signalr/negotiate": FakeResponse(
-            json_data={"ConnectionToken": "tok1"}
+        "/webapi/reports/studenttotal": FakeResponse(
+            json_data={"filterSources": filter_sources}
         ),
-        "/WebApi/signalr/start": FakeResponse(),
-        "/webapi/reports/studenttotal": FakeResponse(json_data={
-            "filterSources": [
-                {"filterId": "SID", "defaultValue": 111},
-                {"filterId": "PCLID", "defaultValue": 222},
-                {"filterId": "period",
-                 "defaultValue": "2026-09-01T00:00:00.0000000 - "
-                                  "2026-09-30T00:00:00.0000000"},
-            ]
+        "/webapi/reports/studenttotal/queue": FakeResponse(json_data={
+            "taskId": 10276200,
+            "queueKey": "report-v2",
         }),
-        "/webapi/reports/studenttotal/queue": FakeResponse(),
-        "/WebApi/signalr/send": FakeResponse(),
-        "/WebApi/signalr/abort": FakeResponse(),
         "/webapi/files/file123": FakeResponse(text="<html>official report</html>"),
     }
-    fake = FakeClient(
-        "https://sgo.example",
-        responses,
-        FakeStream(["initialized\r\n", complete_chunk]),
-    )
+    fake = FakeClient("https://sgo.example", responses)
+
+    socket = FakeSocket([
+        "{}\x1e",
+        '{"type":3,"invocationId":"0","result":{"success":true}}\x1e',
+        '{"type":1,"target":"progress","arguments":[{"taskId":10276200,'
+        '"status":"forming"}]}\x1e',
+        '{"type":1,"target":"complete","arguments":[{"taskId":10276200,'
+        '"data":"file123","componentId":"xyz"}]}\x1e',
+        '{"type":6}\x1e',
+        '{"type":6}\x1e',
+    ])
+
+    def fake_connect(url, **kwargs):
+        fake.url = url
+        fake.additional_headers = kwargs.get("additional_headers")
+        fake.open_timeout = kwargs.get("open_timeout")
+        return socket
 
     ns = NetSchoolAPI("https://sgo.example")
     ns._wrapped_client.client = fake
     ns._ver = "999"
     ns._school_name = "МОУ Лицей №4"
-    ns._year_id = 2026
+    ns._year_id = 7207
+    ns._access_token = "at123"
 
-    html = asyncio.run(ns.report_file(
-        datetime.date(2026, 9, 1), datetime.date(2026, 9, 30)
-    ))
+    with patch("netschoolapi_plus.netschoolapi.connect", fake_connect):
+        html = asyncio.run(ns.report_file(
+            datetime.date(2026, 9, 1), datetime.date(2026, 9, 30)
+        ))
 
     assert html == "<html>official report</html>"
 
     paths = [request.url.path for request in fake.requests]
     assert paths == [
-        "/WebApi/signalr/negotiate",
-        "/WebApi/signalr/start",
         "/webapi/reports/studenttotal",
         "/webapi/reports/studenttotal/queue",
-        "/WebApi/signalr/send",
-        "/WebApi/signalr/abort",
         "/webapi/files/file123",
     ]
 
-    connect_token = fake.requests[4].url.params["connectionToken"]
-    assert fake.requests[0].url.params["transport"] == "webSockets"
-    assert fake.requests[1].url.params["transport"] == "serverSentEvents"
-    assert fake.requests[4].url.params["connectionToken"] == "tok1"
-    assert fake.requests[5].url.params["connectionToken"] == "tok1"
+    assert fake.url == (
+        "wss://sgo.example/signalr/queueHub?at=at123"
+    )
+    assert fake.open_timeout == 15
 
-    payload = json.loads(fake.requests[3].content)
+    payload = json.loads(fake.requests[1].content)
     assert payload["selectedData"] == [
-        {"filterId": "SID", "filterValue": 111},
-        {"filterId": "PCLID", "filterValue": 222},
+        {"filterId": "SID", "filterValue": "562093"},
+        {"filterId": "PCLID", "filterValue": "92540"},
+        {"filterId": "TERMID", "filterValue": "24816"},
         {"filterId": "period",
-         "filterValue": "2026-09-01T00:00:00 - 2026-09-30T00:00:00"},
+         "filterValue": "2026-09-01T00:00:00.000Z - "
+                        "2026-09-30T00:00:00.000Z"},
     ]
     assert payload["params"] == [
-        {"name": "SCHOOLYEARID", "value": 2026},
-        {"name": "SERVERTIMEZONE", "value": 0},
+        {"name": "SCHOOLYEARID", "value": "7207"},
+        {"name": "SERVERTIMEZONE", "value": 3},
         {"name": "FULLSCHOOLNAME", "value": "МОУ Лицей №4"},
-        {"name": "DATEFORMAT", "value": "d\x01mm\x01yy\x01."},
+        {"name": "DATEFORMAT", "value": "d\x01mm\x01yyyy\x01."},
     ]
+
+    assert socket.sent[0] == '{"protocol":"json","version":1}\x1e'
+    start_task = json.loads(socket.sent[1].rstrip("\x1e"))
+    assert start_task == {
+        "arguments": [10276200, "report-v2"],
+        "invocationId": "0",
+        "target": "startTask",
+        "type": 1,
+    }

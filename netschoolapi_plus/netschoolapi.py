@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import date, timedelta
 from hashlib import md5
@@ -6,6 +7,8 @@ from typing import Optional, Dict, List, Union
 
 import httpx
 from httpx import AsyncClient, Response
+
+from websockets import connect
 
 from netschoolapi_plus import errors, schemas
 
@@ -291,140 +294,128 @@ class NetSchoolAPI:
         if not end:
             end = start + timedelta(days=5)
 
-        period = (
-            f"{start.isoformat()}T00:00:00 - {end.isoformat()}T00:00:00"
-        )
         client = self._wrapped_client.client
 
-        negotiate = await self._request_with_optional_relogin(
+        filter_sources = (await self._request_with_optional_relogin(
             requests_timeout,
             client.build_request(
                 method="GET",
-                url=f"{self._url}/WebApi/signalr/negotiate",
-                params={
-                    "_": self._ver,
-                    "at": self._access_token,
-                    "clientProtocol": "1.5",
-                    "transport": "webSockets",
-                },
+                url="reports/studenttotal",
             ),
-        )
-        connect_token = negotiate.json()["ConnectionToken"]
-
-        signalr_params = {
-            "transport": "serverSentEvents",
-            "clientProtocol": "1.5",
-            "at": self._access_token,
-            "connectionToken": connect_token,
-            "connectionData": '[{"name":"queuehub"}]',
+        )).json()["filterSources"]
+        filters = {
+            source["filterId"]: source
+            for source in filter_sources
         }
 
-        async with client.stream(
-            "GET",
-            f"{self._url}/WebApi/signalr/connect",
-            params={**signalr_params, "tid": "8"},
-        ) as stream:
-            async for chunk in stream.aiter_text():
-                if "initialized" in chunk:
-                    await self._request_with_optional_relogin(
-                        requests_timeout,
-                        client.build_request(
-                            method="GET",
-                            url=f"{self._url}/WebApi/signalr/start",
-                            params={**signalr_params, "_": self._ver},
-                        ),
-                    )
-                    filter_sources = (await self._request_with_optional_relogin(
-                        requests_timeout,
-                        client.build_request(
-                            method="GET",
-                            url="reports/studenttotal",
-                        ),
-                    )).json()["filterSources"]
-                    await self._request_with_optional_relogin(
-                        requests_timeout,
-                        client.build_request(
-                            method="POST",
-                            url="reports/studenttotal/queue",
-                            json={
-                                "selectedData": [
-                                    {
-                                        "filterId": "SID",
-                                        "filterValue": (
-                                            filter_sources[0]["defaultValue"]
-                                        ),
-                                    },
-                                    {
-                                        "filterId": "PCLID",
-                                        "filterValue": (
-                                            filter_sources[1]["defaultValue"]
-                                        ),
-                                    },
-                                    {
-                                        "filterId": "period",
-                                        "filterValue": (
-                                            filter_sources[2]["defaultValue"]
-                                            if not period else period
-                                        ),
-                                    },
-                                ],
-                                "params": [
-                                    {
-                                        "name": "SCHOOLYEARID",
-                                        "value": self._year_id,
-                                    },
-                                    {"name": "SERVERTIMEZONE", "value": 0},
-                                    {
-                                        "name": "FULLSCHOOLNAME",
-                                        "value": self._school_name,
-                                    },
-                                    {
-                                        "name": "DATEFORMAT",
-                                        "value": "d\x01mm\x01yy\x01.",
-                                    },
-                                ],
-                            },
-                        ),
-                    )
-                    await self._request_with_optional_relogin(
-                        requests_timeout,
-                        client.build_request(
-                            method="POST",
-                            url=f"{self._url}/WebApi/signalr/send",
-                            params=signalr_params,
-                            data={
-                                "data": (
-                                    '{"H":"queuehub","M":"StartTask",'
-                                    '"A":[1967575],"I":0}'
-                                )
-                            },
-                        ),
-                    )
-                else:
-                    chunk = json.loads(chunk.replace("data: ", ""))
+        period = (
+            f"{start.isoformat()}T00:00:00.000Z - "
+            f"{end.isoformat()}T00:00:00.000Z"
+        )
+
+        task = (await self._request_with_optional_relogin(
+            requests_timeout,
+            client.build_request(
+                method="POST",
+                url="reports/studenttotal/queue",
+                json={
+                    "selectedData": [
+                        {
+                            "filterId": "SID",
+                            "filterValue": filters["SID"]["defaultValue"],
+                        },
+                        {
+                            "filterId": "PCLID",
+                            "filterValue": filters["PCLID"]["defaultValue"],
+                        },
+                        {
+                            "filterId": "TERMID",
+                            "filterValue": filters["TERMID"]["defaultValue"],
+                        },
+                        {
+                            "filterId": "period",
+                            "filterValue": period,
+                        },
+                    ],
+                    "params": [
+                        {
+                            "name": "SCHOOLYEARID",
+                            "value": str(self._year_id),
+                        },
+                        {"name": "SERVERTIMEZONE", "value": 3},
+                        {
+                            "name": "FULLSCHOOLNAME",
+                            "value": self._school_name,
+                        },
+                        {
+                            "name": "DATEFORMAT",
+                            "value": "d\x01mm\x01yyyy\x01.",
+                        },
+                    ],
+                },
+            ),
+        )).json()
+        task_id = task["taskId"]
+        queue_key = task.get("queueKey", "report-v2")
+
+        cookies = "; ".join(
+            f"{key}={value}"
+            for key, value in client.cookies.items()
+        )
+        ws_url = (
+            self._url.replace("https://", "wss://", 1)
+            + f"/signalr/queueHub?at={self._access_token}"
+        )
+
+        file_id = None
+        async with connect(
+            ws_url,
+            additional_headers={"Cookie": cookies},
+            open_timeout=15,
+        ) as websocket:
+            await websocket.send('{"protocol":"json","version":1}\x1e')
+            await websocket.send(
+                json.dumps({
+                    "arguments": [task_id, queue_key],
+                    "invocationId": "0",
+                    "target": "startTask",
+                    "type": 1,
+                })
+                + "\x1e"
+            )
+            while file_id is None:
+                raw = await asyncio.wait_for(
+                    websocket.recv(), timeout=requests_timeout or 120,
+                )
+                if isinstance(raw, bytes):
+                    raw = raw.decode(errors="replace")
+                for chunk in raw.split("\x1e"):
+                    chunk = chunk.strip()
+                    if not chunk:
+                        continue
+                    try:
+                        message = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
                     if (
-                        chunk
-                        and chunk["M"]
-                        and chunk["M"][0]["M"] == "complete"
+                        message.get("type") == 1
+                        and message.get("target") == "complete"
                     ):
-                        await self._request_with_optional_relogin(
-                            requests_timeout,
-                            client.build_request(
-                                method="POST",
-                                url=f"{self._url}/WebApi/signalr/abort",
-                                params=signalr_params,
-                            ),
-                        )
-                        file_id = chunk["M"][0]["A"][0]["Data"]
-                        file_response = await self._request_with_optional_relogin(
-                            requests_timeout,
-                            client.build_request(
-                                method="GET",
-                                url=f"files/{file_id}",
-                            ),
-                        )
-                        return file_response.text
-        return ""
+                        for argument in message.get("arguments") or []:
+                            if "data" in argument:
+                                file_id = argument["data"]
+                                break
+                    if file_id:
+                        break
+
+        file_response = await self._request_with_optional_relogin(
+            requests_timeout,
+            client.build_request(
+                method="GET",
+                url=f"files/{file_id}",
+            ),
+        )
+        return file_response.text
 
     async def logout(self, requests_timeout: int = None):
         try:
