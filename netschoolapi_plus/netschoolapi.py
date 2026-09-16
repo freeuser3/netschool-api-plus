@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 from hashlib import md5
 from io import BytesIO
@@ -21,6 +22,7 @@ async def _die_on_bad_status(response: Response):
 class NetSchoolAPI:
     def __init__(self, url: str, default_requests_timeout: int = None):
         url = url.rstrip('/')
+        self._url = url
         self._wrapped_client = AsyncClientWrapper(
             async_client=AsyncClient(
                 base_url=f'{url}/webapi',
@@ -33,6 +35,8 @@ class NetSchoolAPI:
         self._student_id = -1
         self._year_id = -1
         self._school_id = -1
+        self._school_name = ""
+        self._ver = None
 
         self._assignment_types: Dict[int, str] = {}
         self._login_data = ()
@@ -60,6 +64,7 @@ class NetSchoolAPI:
         ))
         login_meta = response.json()
         salt = login_meta.pop('salt')
+        self._ver = login_meta.get('ver')
 
         encoded_password = md5(
             password.encode('windows-1251')
@@ -276,6 +281,151 @@ class NetSchoolAPI:
         school = schemas.SchoolSchema().load(response.json())
         return school  # type: ignore
 
+    async def report_file(
+            self, start: Optional[date] = None,
+            end: Optional[date] = None,
+            requests_timeout: int = None) -> str:
+        if not start:
+            monday = date.today() - timedelta(days=date.today().weekday())
+            start = monday
+        if not end:
+            end = start + timedelta(days=5)
+
+        period = (
+            f"{start.isoformat()}T00:00:00 - {end.isoformat()}T00:00:00"
+        )
+        client = self._wrapped_client.client
+
+        negotiate = await self._request_with_optional_relogin(
+            requests_timeout,
+            client.build_request(
+                method="GET",
+                url=f"{self._url}/WebApi/signalr/negotiate",
+                params={
+                    "_": self._ver,
+                    "at": self._access_token,
+                    "clientProtocol": "1.5",
+                    "transport": "webSockets",
+                },
+            ),
+        )
+        connect_token = negotiate.json()["ConnectionToken"]
+
+        signalr_params = {
+            "transport": "serverSentEvents",
+            "clientProtocol": "1.5",
+            "at": self._access_token,
+            "connectionToken": connect_token,
+            "connectionData": '[{"name":"queuehub"}]',
+        }
+
+        async with client.stream(
+            "GET",
+            f"{self._url}/WebApi/signalr/connect",
+            params={**signalr_params, "tid": "8"},
+        ) as stream:
+            async for chunk in stream.aiter_text():
+                if "initialized" in chunk:
+                    await self._request_with_optional_relogin(
+                        requests_timeout,
+                        client.build_request(
+                            method="GET",
+                            url=f"{self._url}/WebApi/signalr/start",
+                            params={**signalr_params, "_": self._ver},
+                        ),
+                    )
+                    filter_sources = (await self._request_with_optional_relogin(
+                        requests_timeout,
+                        client.build_request(
+                            method="GET",
+                            url="reports/studenttotal",
+                        ),
+                    )).json()["filterSources"]
+                    await self._request_with_optional_relogin(
+                        requests_timeout,
+                        client.build_request(
+                            method="POST",
+                            url="reports/studenttotal/queue",
+                            json={
+                                "selectedData": [
+                                    {
+                                        "filterId": "SID",
+                                        "filterValue": (
+                                            filter_sources[0]["defaultValue"]
+                                        ),
+                                    },
+                                    {
+                                        "filterId": "PCLID",
+                                        "filterValue": (
+                                            filter_sources[1]["defaultValue"]
+                                        ),
+                                    },
+                                    {
+                                        "filterId": "period",
+                                        "filterValue": (
+                                            filter_sources[2]["defaultValue"]
+                                            if not period else period
+                                        ),
+                                    },
+                                ],
+                                "params": [
+                                    {
+                                        "name": "SCHOOLYEARID",
+                                        "value": self._year_id,
+                                    },
+                                    {"name": "SERVERTIMEZONE", "value": 0},
+                                    {
+                                        "name": "FULLSCHOOLNAME",
+                                        "value": self._school_name,
+                                    },
+                                    {
+                                        "name": "DATEFORMAT",
+                                        "value": "d\x01mm\x01yy\x01.",
+                                    },
+                                ],
+                            },
+                        ),
+                    )
+                    await self._request_with_optional_relogin(
+                        requests_timeout,
+                        client.build_request(
+                            method="POST",
+                            url=f"{self._url}/WebApi/signalr/send",
+                            params=signalr_params,
+                            data={
+                                "data": (
+                                    '{"H":"queuehub","M":"StartTask",'
+                                    '"A":[1967575],"I":0}'
+                                )
+                            },
+                        ),
+                    )
+                else:
+                    chunk = json.loads(chunk.replace("data: ", ""))
+                    if (
+                        chunk
+                        and chunk["M"]
+                        and chunk["M"][0]["M"] == "complete"
+                    ):
+                        await self._request_with_optional_relogin(
+                            requests_timeout,
+                            client.build_request(
+                                method="POST",
+                                url=f"{self._url}/WebApi/signalr/abort",
+                                params=signalr_params,
+                            ),
+                        )
+                        file_id = chunk["M"][0]["A"][0]["Data"]
+                        file_response = await self._request_with_optional_relogin(
+                            requests_timeout,
+                            client.build_request(
+                                method="GET",
+                                url=f"files/{file_id}",
+                            ),
+                        )
+                        return file_response.text
+        return ""
+
     async def logout(self, requests_timeout: int = None):
         try:
             await self._wrapped_client.request(
@@ -325,6 +475,11 @@ class NetSchoolAPI:
         for school in schools:
             if school["shortName"] == school_name:
                 self._school_id = school['id']
+                self._school_name = (
+                    school.get("fullName")
+                    or school.get("shortName")
+                    or school.get("name", "")
+                )
                 return school["id"]
         raise errors.SchoolNotFoundError(school_name)
 
