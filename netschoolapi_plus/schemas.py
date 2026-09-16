@@ -1,11 +1,12 @@
 from dataclasses import field, dataclass
 import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from marshmallow import EXCLUDE, Schema, pre_load
 from marshmallow_dataclass import class_schema
 
-__all__ = ['Attachment', 'Announcement', 'Assignment', 'Diary', 'School']
+__all__ = ['Attachment', 'Announcement', 'Assignment', 'Diary', 'School',
+           'SubjectReport', 'StudentTotalReport']
 
 
 class NetSchoolAPISchema(Schema):
@@ -126,3 +127,22 @@ AssignmentSchema = class_schema(Assignment)
 ShortSchoolSchema = class_schema(ShortSchool)
 SchoolSchema = class_schema(School)
 AnnouncementSchema = class_schema(Announcement)
+
+
+@dataclass
+class SubjectReport:
+    subject: str
+    marks: Dict[datetime.date, str] = field(default_factory=dict)
+    average: Optional[float] = None
+    final: Optional[str] = None
+
+
+@dataclass
+class StudentTotalReport:
+    school: str = ""
+    student: str = ""
+    year: str = ""
+    period_start: Optional[datetime.date] = None
+    period_end: Optional[datetime.date] = None
+    term: str = ""
+    subjects: List[SubjectReport] = field(default_factory=list)

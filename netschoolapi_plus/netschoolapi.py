@@ -11,6 +11,7 @@ from httpx import AsyncClient, Response
 from websockets import connect
 
 from netschoolapi_plus import errors, schemas
+from netschoolapi_plus.report_parser import parse_student_total_report
 
 __all__ = ['NetSchoolAPI']
 
@@ -416,6 +417,18 @@ class NetSchoolAPI:
             ),
         )
         return file_response.text
+
+    async def report_studenttotal(
+            self, start: Optional[date] = None,
+            end: Optional[date] = None,
+            requests_timeout: int = None) -> schemas.StudentTotalReport:
+        if not start:
+            monday = date.today() - timedelta(days=date.today().weekday())
+            start = monday
+        if not end:
+            end = start + timedelta(days=5)
+        html = await self.report_file(start, end, requests_timeout)
+        return parse_student_total_report(html)
 
     async def logout(self, requests_timeout: int = None):
         try:
