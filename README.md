@@ -1,18 +1,33 @@
-# netschoolapi
+# netschoolapi-plus
 
-![Tag](https://img.shields.io/github/v/tag/nm17/netschoolapi)
-![Downloads](https://img.shields.io/pypi/dm/netschoolapi)
+Форк библиотеки [netschoolapi](https://github.com/nm17/netschoolapi) (автор — nm17, лицензия MIT).
 
-NetSchoolAPI — это асинхронный клиент для «Сетевого города», который может получить дневник с домашними заданиями и оценками, объявления и просроченные задания.
+NetSchoolAPI — это асинхронный клиент для «Сетевого города», который может получить дневник с домашними заданиями и оценками, объявления и просроченные задания.
 
-> Библиотека не имеет отношения к «ИрТеху»
+> Отдельная разработка на базе оригинала: исходный код расширяется новыми возможностями (скорректированы импорты под пакет `netschoolapi_plus`).
 
-## Жалобы и предложения
+## Установка (dev, editable)
 
-Обсуждение библиотеки ведётся в [чате](https://t.me/netschoolapi/) проекта в телеграме.
-Если вы хотите сообщить о баге или предложить фичу — создайте [ишью](https://github.com/nm17/netschoolapi/issues/).
+```bash
+uv venv .venv --python 3.11
+uv pip install -e .
+```
+
+## Использование
+
+```python
+from netschoolapi_plus import NetSchoolAPI
+
+ns = NetSchoolAPI("https://sgo.e-mordovia.ru")
+await ns.login("user", "pass", "school")
+diary = await ns.diary(start, end)
+```
+
+## Отличие от оригинала
+
+- пакет переименован в `netschoolapi_plus` → не конфликтует при параллельной установке оригинала;
+- upstream: https://github.com/nm17/netschoolapi
 
 ## Лицензия
 
-Код библиотеки распространяется под лицензией [MIT](LICENSE).
-Это значит, что вы можете копировать, распространять, изменять, публиковать и продавать код netschoolapi без разрешения её авторов, но при условии добавления уведомления об авторских правах во все копии или существенные части Программного обеспечения. Проще говоря, развлекайтесь!
+MIT ([LICENSE](LICENSE)).

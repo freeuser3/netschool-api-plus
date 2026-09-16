@@ -5,7 +5,7 @@ from typing_extensions import Protocol
 
 import httpx
 
-from netschoolapi import errors
+from netschoolapi_plus import errors
 
 DEFAULT_REQUESTS_TIMEOUT = 5
 

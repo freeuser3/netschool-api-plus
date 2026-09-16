@@ -6,11 +6,11 @@ from typing import Optional, Dict, List, Union
 import httpx
 from httpx import AsyncClient, Response
 
-from netschoolapi import errors, schemas
+from netschoolapi_plus import errors, schemas
 
 __all__ = ['NetSchoolAPI']
 
-from netschoolapi.async_client_wrapper import AsyncClientWrapper, Requester
+from netschoolapi_plus.async_client_wrapper import AsyncClientWrapper, Requester
 
 
 async def _die_on_bad_status(response: Response):
