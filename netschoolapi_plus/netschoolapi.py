@@ -289,12 +289,6 @@ class NetSchoolAPI:
             self, start: Optional[date] = None,
             end: Optional[date] = None,
             requests_timeout: int = None) -> str:
-        if not start:
-            monday = date.today() - timedelta(days=date.today().weekday())
-            start = monday
-        if not end:
-            end = start + timedelta(days=5)
-
         client = self._wrapped_client.client
 
         filter_sources = (await self._request_with_optional_relogin(
@@ -308,6 +302,18 @@ class NetSchoolAPI:
             source["filterId"]: source
             for source in filter_sources
         }
+
+        if not start or not end:
+            period_default = filters["period"].get("defaultValue") or ""
+            parts = [p.strip() for p in period_default.split(" - ")]
+            if len(parts) == 2:
+                start = start or date.fromisoformat(parts[0][:10])
+                end = end or date.fromisoformat(parts[1][:10])
+        if not start:
+            monday = date.today() - timedelta(days=date.today().weekday())
+            start = monday
+        if not end:
+            end = start + timedelta(days=5)
 
         period = (
             f"{start.isoformat()}T00:00:00.000Z - "
