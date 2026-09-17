@@ -428,11 +428,6 @@ class NetSchoolAPI:
             self, start: Optional[date] = None,
             end: Optional[date] = None,
             requests_timeout: int = None) -> schemas.StudentTotalReport:
-        if not start:
-            monday = date.today() - timedelta(days=date.today().weekday())
-            start = monday
-        if not end:
-            end = start + timedelta(days=5)
         html = await self.report_file(start, end, requests_timeout)
         return parse_student_total_report(html)
 

@@ -198,3 +198,58 @@ def test_report_file_uses_server_period_when_dates_omitted():
         "filterValue": "2026-09-01T00:00:00.000Z - "
                        "2026-11-30T00:00:00.000Z",
     }
+
+
+def test_report_studenttotal_forwards_none_dates():
+    """Без дат report_studenttotal не должен подставлять неделю сам —
+    пусть report_file берёт серверный период триместра."""
+    filter_sources = [
+        {"filterId": "SID", "defaultValue": "562093"},
+        {"filterId": "PCLID", "defaultValue": "92540"},
+        {"filterId": "TERMID", "defaultValue": "24816"},
+        {
+            "filterId": "period",
+            "defaultValue": "2026-09-01T00:00:00.0000000 - "
+                             "2026-11-30T00:00:00.0000000",
+        },
+    ]
+    responses = {
+        "/webapi/reports/studenttotal": FakeResponse(
+            json_data={"filterSources": filter_sources}
+        ),
+        "/webapi/reports/studenttotal/queue": FakeResponse(json_data={
+            "taskId": 10276202,
+            "queueKey": "report-v2",
+        }),
+        "/webapi/files/file789": FakeResponse(
+            text="<html>official report HTML</html>"
+        ),
+    }
+    fake = FakeClient("https://sgo.example", responses)
+
+    socket = FakeSocket([
+        '{"type":1,"target":"complete","arguments":[{"taskId":10276202,'
+        '"data":"file789"}]}\x1e',
+    ])
+
+    def fake_connect(url, **kwargs):
+        return socket
+
+    ns = NetSchoolAPI("https://sgo.example")
+    ns._wrapped_client.client = fake
+    ns._ver = "999"
+    ns._school_name = "МОУ Лицей №4"
+    ns._year_id = 7207
+    ns._access_token = "at123"
+
+    with patch("netschoolapi_plus.netschoolapi.connect", fake_connect), \
+         patch("netschoolapi_plus.netschoolapi.parse_student_total_report") as mock_parse:
+        mock_parse.return_value = "parsed"
+        result = asyncio.run(ns.report_studenttotal())
+
+    assert result == "parsed"
+    mock_parse.assert_called_once_with("<html>official report HTML</html>")
+    payload = json.loads(fake.requests[1].content)
+    assert payload["selectedData"][3]["filterValue"] == (
+        "2026-09-01T00:00:00.000Z - 2026-11-30T00:00:00.000Z"
+    )
