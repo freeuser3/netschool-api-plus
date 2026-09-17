@@ -1,6 +1,6 @@
 [project]
 name = "netschoolapi-plus"
-version = "11.0.5"
+version = "11.1.0"
 description = "Форк netschoolapi: асинхронный API-клиент для «Сетевого города» с расширенными возможностями"
 readme = "README.md"
 license = "MIT"
